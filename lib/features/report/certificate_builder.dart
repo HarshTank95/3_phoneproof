@@ -63,7 +63,7 @@ class CertificateBuilder {
                         pw.Text(report.build.marketName,
                             style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold)),
                         pw.SizedBox(height: 4),
-                        pw.Text('Android ${report.build.release} • ${report.mode == ScanMode.buyer ? 'Buyer scan' : 'Seller scan'}',
+                        pw.Text('Android ${report.build.release} • Forensic scan',
                             style: const pw.TextStyle(fontSize: 11, color: PdfColors.grey700)),
                         if (report.imei != null && report.imei!.isNotEmpty)
                           pw.Text('IMEI (entered, unverifiable): ${report.imei}',

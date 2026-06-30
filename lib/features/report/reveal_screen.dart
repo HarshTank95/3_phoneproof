@@ -76,7 +76,7 @@ class _RevealScreenState extends State<RevealScreen> {
               const SizedBox(height: 2),
               Center(
                 child: Text(
-                  'Android ${r.build.release}  ·  ${r.mode == ScanMode.buyer ? 'Buyer scan' : 'Seller scan'}',
+                  'Android ${r.build.release}  ·  Forensic scan',
                   style: const TextStyle(color: AppColors.textDim, fontSize: 12.5),
                 ),
               ),

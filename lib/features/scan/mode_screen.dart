@@ -5,11 +5,18 @@ import '../../ui/glass_card.dart';
 import '../../ui/motion.dart';
 import '../../ui/theme.dart';
 import '../../ui/transitions.dart';
-import 'claim_screen.dart';
+import 'scan_screen.dart';
 
-/// First screen: pick Buyer vs Seller. Sets the tone and copy.
+/// Landing screen. One scan covers both buying and selling — pitch it once,
+/// then drop straight into the scan.
 class ModeScreen extends StatelessWidget {
   const ModeScreen({super.key});
+
+  void _startScan(BuildContext context) {
+    Navigator.of(context).push(
+      sharedAxisRoute(context, ScanScreen(mode: ScanMode.buyer, claim: const Claim())),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -47,32 +54,49 @@ class ModeScreen extends StatelessWidget {
                         ?.copyWith(fontSize: 44, height: 1.05)),
                 const SizedBox(height: 12),
                 const Text(
-                  'A forensic scanner for second-hand phones. Reads the real age, '
-                  'battery wear and specs that fakes and lying sellers can’t spoof.',
+                  'A forensic scanner for second-hand phones. Whether you’re buying or '
+                  'selling, one scan reads the real age, battery wear and specs that fakes '
+                  'and lying sellers can’t spoof.',
                   style: TextStyle(color: AppColors.textDim, fontSize: 15, height: 1.4),
                 ),
-                const SizedBox(height: 32),
+                const SizedBox(height: 28),
                 Expanded(
-                  child: Column(
-                    children: [
-                      _ModeTile(
-                        mode: ScanMode.buyer,
-                        icon: Icons.search_rounded,
-                        title: 'I’m buying',
-                        subtitle:
-                            'Run a full scan, get a Trust Score and red flags before you pay.',
+                  child: Center(
+                    child: GlassCard(
+                      padding: const EdgeInsets.all(22),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: const [
+                          Text('What the scan reveals',
+                              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
+                          SizedBox(height: 16),
+                          _Point(Icons.battery_full_rounded, 'Battery truth',
+                              'Real health, wear and live condition.'),
+                          SizedBox(height: 14),
+                          _Point(Icons.memory_rounded, 'Anti-spoof specs',
+                              'Storage, RAM, display, sensors and CPU — measured, not trusted.'),
+                          SizedBox(height: 14),
+                          _Point(Icons.verified_user_rounded, 'Authenticity',
+                              'Emulator / root heuristics and a genuine-device check.'),
+                          SizedBox(height: 14),
+                          _Point(Icons.workspace_premium_rounded, 'Trust Certificate',
+                              'A Trust Score and a shareable, tamper-evident report.'),
+                        ],
                       ),
-                      const SizedBox(height: 16),
-                      _ModeTile(
-                        mode: ScanMode.seller,
-                        icon: Icons.workspace_premium_rounded,
-                        title: 'I’m selling',
-                        subtitle:
-                            'Prove your phone is genuine and healthy. Generate a Verified Certificate.',
-                      ),
-                    ],
+                    ),
                   ),
                 ),
+                const SizedBox(height: 20),
+                FilledButton.icon(
+                  onPressed: () => _startScan(context),
+                  icon: const Icon(Icons.radar_rounded),
+                  label: const Text('Scan this phone'),
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size.fromHeight(54),
+                  ),
+                ),
+                const SizedBox(height: 14),
                 const Row(
                   children: [
                     Icon(Icons.lock_outline_rounded, size: 14, color: AppColors.textDim),
@@ -94,52 +118,40 @@ class ModeScreen extends StatelessWidget {
   }
 }
 
-class _ModeTile extends StatelessWidget {
-  final ScanMode mode;
+class _Point extends StatelessWidget {
   final IconData icon;
   final String title;
   final String subtitle;
-  const _ModeTile(
-      {required this.mode, required this.icon, required this.title, required this.subtitle});
+  const _Point(this.icon, this.title, this.subtitle);
 
   @override
   Widget build(BuildContext context) {
-    return Expanded(
-      child: PressScale(
-        onTap: () => Navigator.of(context)
-            .push(sharedAxisRoute(context, ClaimScreen(mode: mode))),
-        child: GlassCard(
-          padding: const EdgeInsets.all(22),
-          child: Row(
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 38,
+          height: 38,
+          decoration: BoxDecoration(
+            color: AppColors.accent.withValues(alpha: 0.14),
+            borderRadius: BorderRadius.circular(11),
+          ),
+          child: Icon(icon, color: AppColors.accent, size: 20),
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
-                width: 56,
-                height: 56,
-                decoration: BoxDecoration(
-                  color: AppColors.accent.withValues(alpha: 0.14),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Icon(icon, color: AppColors.accent, size: 28),
-              ),
-              const SizedBox(width: 18),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(title, style: Theme.of(context).textTheme.titleLarge),
-                    const SizedBox(height: 4),
-                    Text(subtitle,
-                        style: const TextStyle(
-                            color: AppColors.textDim, fontSize: 13, height: 1.3)),
-                  ],
-                ),
-              ),
-              const Icon(Icons.chevron_right_rounded, color: AppColors.textDim),
+              Text(title, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
+              const SizedBox(height: 2),
+              Text(subtitle,
+                  style: const TextStyle(
+                      color: AppColors.textDim, fontSize: 12.5, height: 1.3)),
             ],
           ),
         ),
-      ),
+      ],
     );
   }
 }
