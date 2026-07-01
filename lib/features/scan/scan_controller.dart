@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 
 import '../../core/models/battery_truth.dart';
+import '../../core/models/device_truth.dart';
 import '../../core/models/report.dart';
 import '../../core/models/spec_truth.dart';
 import '../../core/models/test_result.dart';
+import '../../core/native_bridge.dart';
 import '../../core/shizuku.dart';
 import '../../core/trust_score.dart';
 import '../authenticity/emulator_root_heuristics.dart';
@@ -45,6 +47,16 @@ class ScanController extends ChangeNotifier {
   RamTruth? ram;
   StorageTruth? storage;
   AuthenticityTruth? authenticity;
+
+  // Tier A truths (hardware-backed, read-only).
+  AttestationTruth? attestation;
+  DrmTruth? drm;
+  GpuTruth? gpu;
+  DisplayHdrTruth? displayHdr;
+  FeatureInventory? features;
+  UptimeTruth? uptime;
+  ThermalTruth? thermal;
+  CameraTruth? cameras;
 
   // Interactive functional results (filled by the guided steps).
   final List<CheckResult> functionalResults = [];
@@ -95,6 +107,14 @@ class ScanController extends ChangeNotifier {
     s = await StorageTest.writeVerify(s, sampleMb: 64);
     s = await StorageTest.speed(s);
     storage = s;
+    // Tier A spec-side reads (real GPU, panel HDR, DRM level, feature inventory,
+    // thermal headroom, camera hardware).
+    gpu = GpuTruth.fromMap(await NativeBridge.gpuInfo());
+    displayHdr = DisplayHdrTruth.fromMap(await NativeBridge.displayHdr());
+    drm = DrmTruth.fromMap(await NativeBridge.drmInfo());
+    features = FeatureInventory.fromMap(await NativeBridge.systemFeatures());
+    thermal = ThermalTruth.fromMap(await NativeBridge.thermalStatus());
+    cameras = CameraTruth.fromList(await NativeBridge.cameraSpecs());
     _finish('specs',
         '${cpu!.cores} cores · ${ram!.totalGb.toStringAsFixed(0)}GB · ${storage!.verified == true ? 'storage OK' : 'storage ?'}');
     await _pace();
@@ -105,8 +125,15 @@ class ScanController extends ChangeNotifier {
     final verdict = await PlayIntegrity.check();
     auth = auth.withIntegrity(verdict);
     authenticity = auth;
+    // Tier A: hardware key attestation (verified boot + bootloader lock) + uptime.
+    attestation = AttestationTruth.fromMap(await NativeBridge.keyAttestation());
+    uptime = UptimeTruth.fromMap(await NativeBridge.uptime());
     _finish('authenticity',
-        auth.isEmulator ? 'Emulator!' : (auth.isRooted ? 'Root markers' : 'Clean'));
+        auth.isEmulator
+            ? 'Emulator!'
+            : attestation?.isTampered == true
+                ? 'Boot unverified'
+                : (auth.isRooted ? 'Root markers' : 'Clean'));
     await _pace();
   }
 
@@ -156,6 +183,14 @@ class ScanController extends ChangeNotifier {
       ram: ram ?? _emptyRam(),
       storage: storage ?? _emptyStorage(),
       authenticity: authenticity ?? _emptyAuth(),
+      attestation: attestation ?? const AttestationTruth(),
+      drm: drm ?? const DrmTruth(),
+      gpu: gpu ?? const GpuTruth(),
+      displayHdr: displayHdr ?? const DisplayHdrTruth(),
+      features: features ?? const FeatureInventory({}),
+      uptime: uptime ?? const UptimeTruth(),
+      thermal: thermal ?? const ThermalTruth(),
+      cameras: cameras ?? const CameraTruth([]),
       functional: functionalGroup,
       imei: imei,
     );

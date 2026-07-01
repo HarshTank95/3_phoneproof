@@ -114,38 +114,76 @@ class _Row extends StatelessWidget {
   final CheckResult check;
   const _Row({required this.check});
 
+  /// Short single-value readings sit inline with the title; longer ones drop
+  /// to their own line so nothing is truncated at a glance.
+  bool get _inlineDetail =>
+      check.detail.isNotEmpty &&
+      check.detail.length <= 18 &&
+      !check.detail.contains('\n') &&
+      !check.detail.contains('·');
+
   @override
   Widget build(BuildContext context) {
+    final color = check.status.color;
+    final emphasis = check.status == CheckStatus.fail || check.status == CheckStatus.caution;
     return InkWell(
       borderRadius: BorderRadius.circular(10),
       onTap: () => _showDetail(context, check),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+      child: IntrinsicHeight(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  child: Text(check.title,
-                      style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
-                ),
-                const SizedBox(width: 8),
-                StatusChip(icon: check.status.icon, label: check.status.label, color: check.status.color),
-                const SizedBox(width: 6),
-                const Icon(Icons.info_outline_rounded, size: 16, color: AppColors.textDim),
-              ],
+            // Left status accent bar — quick colour scan down the list.
+            Container(
+              width: 3,
+              margin: const EdgeInsets.symmetric(vertical: 11),
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: check.status == CheckStatus.info ? 0.55 : 0.9),
+                borderRadius: BorderRadius.circular(2),
+              ),
             ),
-            if (check.detail.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              Text(check.detail, style: const TextStyle(color: AppColors.text, fontSize: 13)),
-            ],
-            if (check.meaning.isNotEmpty) ...[
-              const SizedBox(height: 2),
-              Text(check.meaning,
-                  style: const TextStyle(color: AppColors.textDim, fontSize: 11.5, height: 1.3)),
-            ],
+            const SizedBox(width: 12),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(check.title,
+                              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
+                        ),
+                        if (_inlineDetail) ...[
+                          const SizedBox(width: 8),
+                          Text(check.detail,
+                              style: TextStyle(
+                                  fontSize: 13.5,
+                                  fontWeight: FontWeight.w600,
+                                  color: emphasis ? color : AppColors.text)),
+                        ],
+                        const SizedBox(width: 10),
+                        // Single trailing status glyph (shape = colour-blind safe).
+                        Icon(check.status.icon, size: 18, color: color),
+                      ],
+                    ),
+                    if (!_inlineDetail && check.detail.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Text(check.detail,
+                          style: TextStyle(
+                              color: emphasis ? color : AppColors.text, fontSize: 13)),
+                    ],
+                    if (check.meaning.isNotEmpty) ...[
+                      const SizedBox(height: 3),
+                      Text(check.meaning,
+                          style: const TextStyle(
+                              color: AppColors.textDim, fontSize: 11.5, height: 1.3)),
+                    ],
+                  ],
+                ),
+              ),
+            ),
           ],
         ),
       ),

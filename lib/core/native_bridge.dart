@@ -41,4 +41,13 @@ class NativeBridge {
       _map('storageWriteVerify', {'sampleMb': sampleMb});
   static Future<Map<dynamic, dynamic>> storageSpeed() => _map('storageSpeed');
   static Future<Map<dynamic, dynamic>> cpuBenchmark() => _map('cpuBenchmark');
+
+  // Tier A — read-only, no special permission.
+  static Future<Map<dynamic, dynamic>> keyAttestation() => _map('keyAttestation');
+  static Future<Map<dynamic, dynamic>> drmInfo() => _map('drmInfo');
+  static Future<Map<dynamic, dynamic>> gpuInfo() => _map('gpuInfo');
+  static Future<Map<dynamic, dynamic>> displayHdr() => _map('displayHdr');
+  static Future<Map<dynamic, dynamic>> systemFeatures() => _map('systemFeatures');
+  static Future<Map<dynamic, dynamic>> uptime() => _map('uptime');
+  static Future<List<dynamic>> cameraSpecs() => _list('cameraSpecs');
 }

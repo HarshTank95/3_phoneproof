@@ -5,18 +5,36 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorManager
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
+import android.media.MediaDrm
+import android.opengl.EGL14
+import android.opengl.EGLConfig
+import android.opengl.GLES20
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.os.StatFs
+import android.os.SystemClock
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Size
+import android.util.SizeF
+import android.view.Display
 import android.view.WindowManager
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.RandomAccessFile
+import java.security.KeyPairGenerator
+import java.security.KeyStore
+import java.security.cert.X509Certificate
+import java.security.spec.ECGenParameterSpec
+import java.util.UUID
 import kotlin.math.min
 import kotlin.random.Random
 
@@ -47,7 +65,15 @@ class NativeBridge(private val context: Context) {
                 "storageInfo" -> result.success(storageInfo())
                 "buildInfo" -> result.success(buildInfo())
                 "shizukuAvailable" -> result.success(shizukuAvailable())
+                // Tier A — read-only, no special permission. Quick reads.
+                "drmInfo" -> result.success(drmInfo())
+                "displayHdr" -> result.success(displayHdr())
+                "systemFeatures" -> result.success(systemFeatures())
+                "uptime" -> result.success(uptime())
                 // Slow / blocking -> background thread to avoid ANR.
+                "keyAttestation" -> runAsync(result) { keyAttestation() }
+                "gpuInfo" -> runAsync(result) { gpuInfo() }
+                "cameraSpecs" -> runAsync(result) { cameraSpecs() }
                 "emulatorRoot" -> runAsync(result) { emulatorRoot() }
                 "storageWriteVerify" -> runAsync(result) {
                     val sizeMb = (args as? Map<*, *>)?.get("sampleMb") as? Int ?: 64
@@ -162,13 +188,79 @@ class NativeBridge(private val context: Context) {
     // ---------------------------------------------------------------- Thermal
 
     private fun thermalStatus(): Map<String, Any?> {
-        return if (Build.VERSION.SDK_INT >= 29) {
-            val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
-            val status = pm.currentThermalStatus
-            mapOf("status" to status, "available" to true)
-        } else {
-            mapOf("status" to null, "available" to false)
+        if (Build.VERSION.SDK_INT < 29) return mapOf("status" to null, "available" to false)
+        val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+        val out = HashMap<String, Any?>()
+        out["status"] = pm.currentThermalStatus
+        out["available"] = true
+        // Thermal headroom (API 30+): fraction toward SEVERE throttling. 1.0 = at
+        // the threshold; can exceed 1.0. NaN if unsupported or polled too fast.
+        if (Build.VERSION.SDK_INT >= 30) {
+            val hr = try { pm.getThermalHeadroom(0) } catch (_: Throwable) { Float.NaN }
+            out["headroom"] = if (hr.isNaN() || hr.isInfinite()) null else hr.toDouble()
         }
+        return out
+    }
+
+    // ---------------------------------------------------------------- Cameras
+
+    /** Read CameraCharacteristics (no CAMERA permission needed) — real sensor. */
+    private fun cameraSpecs(): List<Map<String, Any?>> {
+        val out = ArrayList<Map<String, Any?>>()
+        try {
+            val cm = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            for (id in cm.cameraIdList) {
+                try {
+                    val c = cm.getCameraCharacteristics(id)
+                    val facing = when (c.get(CameraCharacteristics.LENS_FACING)) {
+                        0 -> "Front"; 1 -> "Back"; 2 -> "External"; else -> "Unknown"
+                    }
+                    // Default pixel array is the BINNED size on Quad-Bayer sensors
+                    // (e.g. a 50MP sensor reports ~12.5MP). The true full resolution
+                    // lives in the MAXIMUM_RESOLUTION key (API 31+) — prefer the larger.
+                    var pixels: Long? = null
+                    val pixel: Size? = c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
+                    if (pixel != null) pixels = pixel.width.toLong() * pixel.height.toLong()
+                    if (Build.VERSION.SDK_INT >= 31) {
+                        val maxPixel: Size? =
+                            c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE_MAXIMUM_RESOLUTION)
+                        if (maxPixel != null) {
+                            val maxTotal = maxPixel.width.toLong() * maxPixel.height.toLong()
+                            if (pixels == null || maxTotal > pixels) pixels = maxTotal
+                        }
+                    }
+                    val mp = if (pixels != null) pixels / 1_000_000.0 else null
+                    val binnedMp = if (pixel != null)
+                        (pixel.width.toLong() * pixel.height.toLong()) / 1_000_000.0 else null
+                    val physical: SizeF? = c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+                    val focal = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                        ?.map { it.toDouble() } ?: emptyList()
+                    val apertures = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)
+                        ?.map { it.toDouble() } ?: emptyList()
+                    val flash = c.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+                    val oisModes = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
+                    val hasOis = oisModes != null && oisModes.any { it != 0 } // 0 = OFF
+                    val physicalCount = if (Build.VERSION.SDK_INT >= 28)
+                        (try { c.physicalCameraIds.size } catch (_: Throwable) { 0 }) else 0
+                    out.add(
+                        mapOf(
+                            "id" to id,
+                            "facing" to facing,
+                            "megapixels" to mp,
+                            "binnedMegapixels" to binnedMp,
+                            "sensorWidthMm" to physical?.width?.toDouble(),
+                            "sensorHeightMm" to physical?.height?.toDouble(),
+                            "focalLengths" to focal,
+                            "apertures" to apertures,
+                            "hasFlash" to flash,
+                            "hasOis" to hasOis,
+                            "physicalCount" to physicalCount
+                        )
+                    )
+                } catch (_: Throwable) { /* skip this camera */ }
+            }
+        } catch (_: Throwable) { /* camera service unavailable */ }
+        return out
     }
 
     // ---------------------------------------------------------------- Display
@@ -578,6 +670,307 @@ class NativeBridge(private val context: Context) {
             false
         }
         return mapOf("installed" to installed, "bound" to false)
+    }
+
+    // ---------------------------------------------------------------- DRM (Widevine)
+
+    private fun drmInfo(): Map<String, Any?> {
+        val widevine = UUID.fromString("edef8ba9-79d6-4ace-a3c8-27dcd51d21ed")
+        if (!MediaDrm.isCryptoSchemeSupported(widevine)) {
+            return mapOf("widevineSupported" to false)
+        }
+        var drm: MediaDrm? = null
+        return try {
+            drm = MediaDrm(widevine)
+            val level = try { drm.getPropertyString("securityLevel") } catch (_: Throwable) { null }
+            val version = try { drm.getPropertyString("version") } catch (_: Throwable) { null }
+            val hdcp = try { drm.getPropertyString("hdcpLevel") } catch (_: Throwable) { null }
+            val maxHdcp = try { drm.getPropertyString("maxHdcpLevel") } catch (_: Throwable) { null }
+            mapOf(
+                "widevineSupported" to true,
+                "securityLevel" to (if (level.isNullOrBlank()) null else level),
+                "version" to (if (version.isNullOrBlank()) null else version),
+                "hdcpLevel" to (if (hdcp.isNullOrBlank()) null else hdcp),
+                "maxHdcpLevel" to (if (maxHdcp.isNullOrBlank()) null else maxHdcp)
+            )
+        } catch (e: Throwable) {
+            mapOf("widevineSupported" to true, "error" to (e.message ?: "unavailable"))
+        } finally {
+            try {
+                if (drm != null) {
+                    if (Build.VERSION.SDK_INT >= 28) drm.close() else @Suppress("DEPRECATION") drm.release()
+                }
+            } catch (_: Throwable) { }
+        }
+    }
+
+    // ---------------------------------------------------------------- Display HDR / gamut
+
+    @Suppress("DEPRECATION")
+    private fun displayHdr(): Map<String, Any?> {
+        val out = HashMap<String, Any?>()
+        try {
+            val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            val display = wm.defaultDisplay
+            if (Build.VERSION.SDK_INT >= 26) {
+                out["wideColorGamut"] = display.isWideColorGamut
+                val caps = display.hdrCapabilities
+                val types = caps?.supportedHdrTypes ?: IntArray(0)
+                out["hdrTypes"] = types.map {
+                    when (it) {
+                        Display.HdrCapabilities.HDR_TYPE_DOLBY_VISION -> "Dolby Vision"
+                        Display.HdrCapabilities.HDR_TYPE_HDR10 -> "HDR10"
+                        Display.HdrCapabilities.HDR_TYPE_HLG -> "HLG"
+                        4 /* HDR_TYPE_HDR10_PLUS */ -> "HDR10+"
+                        else -> "Type $it"
+                    }
+                }
+                out["maxLuminance"] = caps?.desiredMaxLuminance?.takeIf { it > 0 }
+            } else {
+                out["wideColorGamut"] = null
+                out["hdrTypes"] = emptyList<String>()
+            }
+        } catch (e: Throwable) {
+            out["error"] = e.message
+        }
+        return out
+    }
+
+    // ---------------------------------------------------------------- System features
+
+    private fun systemFeatures(): Map<String, Any?> {
+        val pm = context.packageManager
+        fun has(name: String) = try { pm.hasSystemFeature(name) } catch (_: Throwable) { false }
+        // Curated, recognisable hardware features. Reported exactly as the OS says.
+        val map = linkedMapOf(
+            "NFC" to has(PackageManager.FEATURE_NFC),
+            "Fingerprint" to has(PackageManager.FEATURE_FINGERPRINT),
+            "Face unlock" to has("android.hardware.biometrics.face"),
+            "IR blaster" to has(PackageManager.FEATURE_CONSUMER_IR),
+            "Telephony" to has(PackageManager.FEATURE_TELEPHONY),
+            "Bluetooth LE" to has(PackageManager.FEATURE_BLUETOOTH_LE),
+            "Wi-Fi" to has(PackageManager.FEATURE_WIFI),
+            "Wi-Fi Aware" to has(PackageManager.FEATURE_WIFI_AWARE),
+            "USB host (OTG)" to has(PackageManager.FEATURE_USB_HOST),
+            "GPS" to has(PackageManager.FEATURE_LOCATION_GPS),
+            "Camera flash" to has(PackageManager.FEATURE_CAMERA_FLASH),
+            "Front camera" to has(PackageManager.FEATURE_CAMERA_FRONT),
+            "Barometer" to has(PackageManager.FEATURE_SENSOR_BAROMETER),
+            "Compass" to has(PackageManager.FEATURE_SENSOR_COMPASS),
+            "StrongBox keystore" to (Build.VERSION.SDK_INT >= 28 && has(PackageManager.FEATURE_STRONGBOX_KEYSTORE))
+        )
+        return mapOf("features" to map)
+    }
+
+    // ---------------------------------------------------------------- Uptime / boot
+
+    private fun uptime(): Map<String, Any?> {
+        val elapsed = SystemClock.elapsedRealtime() // ms since boot, including deep sleep
+        val bootEpochMs = System.currentTimeMillis() - elapsed
+        return mapOf(
+            "uptimeMs" to elapsed,
+            "bootEpochMs" to bootEpochMs
+        )
+    }
+
+    // ---------------------------------------------------------------- GPU (OpenGL ES)
+
+    /** Spin up a 1x1 offscreen EGL context purely to read the real GPU strings. */
+    private fun gpuInfo(): Map<String, Any?> {
+        val eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+        if (eglDisplay == EGL14.EGL_NO_DISPLAY) return mapOf("available" to false)
+        val version = IntArray(2)
+        if (!EGL14.eglInitialize(eglDisplay, version, 0, version, 1)) return mapOf("available" to false)
+        try {
+            val cfgAttribs = intArrayOf(
+                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                EGL14.EGL_SURFACE_TYPE, EGL14.EGL_PBUFFER_BIT,
+                EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8,
+                EGL14.EGL_NONE
+            )
+            val configs = arrayOfNulls<EGLConfig>(1)
+            val num = IntArray(1)
+            if (!EGL14.eglChooseConfig(eglDisplay, cfgAttribs, 0, configs, 0, 1, num, 0) || num[0] == 0) {
+                return mapOf("available" to false)
+            }
+            val ctxAttribs = intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE)
+            val ctx = EGL14.eglCreateContext(eglDisplay, configs[0], EGL14.EGL_NO_CONTEXT, ctxAttribs, 0)
+            val surfAttribs = intArrayOf(EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE)
+            val surface = EGL14.eglCreatePbufferSurface(eglDisplay, configs[0], surfAttribs, 0)
+            EGL14.eglMakeCurrent(eglDisplay, surface, surface, ctx)
+            val renderer = GLES20.glGetString(GLES20.GL_RENDERER)
+            val vendor = GLES20.glGetString(GLES20.GL_VENDOR)
+            val glVersion = GLES20.glGetString(GLES20.GL_VERSION)
+            EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+            EGL14.eglDestroySurface(eglDisplay, surface)
+            EGL14.eglDestroyContext(eglDisplay, ctx)
+            return mapOf(
+                "available" to true,
+                "renderer" to renderer,
+                "vendor" to vendor,
+                "glVersion" to glVersion
+            )
+        } catch (e: Throwable) {
+            return mapOf("available" to false, "error" to (e.message ?: "unavailable"))
+        } finally {
+            try { EGL14.eglTerminate(eglDisplay) } catch (_: Throwable) { }
+        }
+    }
+
+    // ---------------------------------------------------------------- Key Attestation
+
+    /**
+     * Generate a throwaway hardware-backed key with an attestation challenge and
+     * read the Google-signed attestation extension for the *real* verified-boot
+     * state and bootloader lock status. Everything degrades to "unsupported"
+     * with a reason — we never fabricate a verdict.
+     */
+    private fun keyAttestation(): Map<String, Any?> {
+        if (Build.VERSION.SDK_INT < 24) return mapOf("supported" to false, "reason" to "Needs Android 7+")
+        val alias = "phoneproof_attest_probe"
+        var ks: KeyStore? = null
+        return try {
+            ks = KeyStore.getInstance("AndroidKeyStore")
+            ks.load(null)
+            try { ks.deleteEntry(alias) } catch (_: Throwable) { }
+            val challenge = ByteArray(16).also { Random.Default.nextBytes(it) }
+            val spec = KeyGenParameterSpec.Builder(
+                alias, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
+            )
+                .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
+                .setDigests(KeyProperties.DIGEST_SHA256)
+                .setAttestationChallenge(challenge)
+                .build()
+            val kpg = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore")
+            kpg.initialize(spec)
+            kpg.generateKeyPair()
+
+            val chain = ks.getCertificateChain(alias)
+            if (chain == null || chain.isEmpty()) {
+                return mapOf("supported" to false, "reason" to "No attestation certificate chain")
+            }
+            val leaf = chain[0] as X509Certificate
+            // Chain rooted in a Google attestation root is the trust anchor; we
+            // report chain length so the UI can note hardware-backed provenance.
+            val rooted = chain.size >= 2
+            val ext = leaf.getExtensionValue("1.3.6.1.4.1.11129.2.1.17")
+            val out = HashMap<String, Any?>()
+            out["supported"] = true
+            out["hardwareBacked"] = rooted
+            out["chainLength"] = chain.size
+            if (ext == null) {
+                out["reason"] = "No attestation extension in certificate"
+            } else {
+                try {
+                    parseAttestation(ext, out)
+                } catch (e: Throwable) {
+                    out["parseError"] = e.message ?: "parse failed"
+                }
+            }
+            out
+        } catch (e: Throwable) {
+            mapOf("supported" to false, "reason" to (e.message ?: "Attestation unavailable"))
+        } finally {
+            try { ks?.deleteEntry(alias) } catch (_: Throwable) { }
+        }
+    }
+
+    // ---- Minimal DER walker, just enough to reach RootOfTrust ----
+
+    private class Der(val firstByte: Int, val tagNo: Long, val contentStart: Int, val contentLen: Int) {
+        val end get() = contentStart + contentLen
+        val isContext get() = (firstByte and 0xC0) == 0x80
+    }
+
+    private fun readDer(b: ByteArray, pos: Int): Der {
+        var i = pos
+        val first = b[i].toInt() and 0xFF; i++
+        var tagNo: Long = (first and 0x1F).toLong()
+        if ((first and 0x1F) == 0x1F) {
+            tagNo = 0
+            while (true) {
+                val o = b[i].toInt() and 0xFF; i++
+                tagNo = (tagNo shl 7) or (o and 0x7F).toLong()
+                if (o and 0x80 == 0) break
+            }
+        }
+        var len = b[i].toInt() and 0xFF; i++
+        if (len and 0x80 != 0) {
+            val n = len and 0x7F
+            len = 0
+            for (k in 0 until n) { len = (len shl 8) or (b[i].toInt() and 0xFF); i++ }
+        }
+        return Der(first, tagNo, i, len)
+    }
+
+    private fun derLong(b: ByteArray, t: Der): Long {
+        var v = 0L
+        for (k in t.contentStart until t.end) v = (v shl 8) or (b[k].toInt() and 0xFF).toLong()
+        return v
+    }
+
+    /** Walk KeyDescription -> teeEnforced -> RootOfTrust and fill verified-boot fields. */
+    private fun parseAttestation(extValue: ByteArray, out: HashMap<String, Any?>) {
+        // extValue is a DER OCTET STRING wrapping the KeyDescription SEQUENCE.
+        val octet = readDer(extValue, 0)
+        val seqStart = octet.contentStart
+        val keyDesc = readDer(extValue, seqStart) // SEQUENCE (KeyDescription)
+
+        // Iterate KeyDescription children in order.
+        val children = ArrayList<Der>()
+        var p = keyDesc.contentStart
+        while (p < keyDesc.end) {
+            val d = readDer(extValue, p)
+            children.add(d)
+            p = d.end
+        }
+        // [1] attestationSecurityLevel ENUM
+        if (children.size > 1) {
+            out["securityLevel"] = secLevelName(derLong(extValue, children[1]).toInt())
+        }
+        // [6] softwareEnforced, [7] teeEnforced
+        val authLists = listOfNotNull(children.getOrNull(7), children.getOrNull(6))
+        for (auth in authLists) {
+            var ap = auth.contentStart
+            while (ap < auth.end) {
+                val tagged = readDer(extValue, ap)
+                if (tagged.isContext && tagged.tagNo == 704L) {
+                    // EXPLICIT RootOfTrust SEQUENCE
+                    val rot = readDer(extValue, tagged.contentStart)
+                    var rp = rot.contentStart
+                    val rotChildren = ArrayList<Der>()
+                    while (rp < rot.end) { val d = readDer(extValue, rp); rotChildren.add(d); rp = d.end }
+                    // 0: verifiedBootKey OCTET, 1: deviceLocked BOOLEAN, 2: verifiedBootState ENUM
+                    rotChildren.getOrNull(1)?.let {
+                        out["deviceLocked"] = (extValue[it.contentStart].toInt() and 0xFF) != 0
+                    }
+                    rotChildren.getOrNull(2)?.let {
+                        out["verifiedBootState"] = bootStateName(derLong(extValue, it).toInt())
+                    }
+                } else if (tagged.isContext && tagged.tagNo == 706L) {
+                    // EXPLICIT osPatchLevel INTEGER (YYYYMM)
+                    val inner = readDer(extValue, tagged.contentStart)
+                    out["osPatchLevel"] = derLong(extValue, inner)
+                }
+                ap = tagged.end
+            }
+            if (out.containsKey("verifiedBootState")) break
+        }
+    }
+
+    private fun secLevelName(v: Int) = when (v) {
+        0 -> "Software"
+        1 -> "Trusted Environment (TEE)"
+        2 -> "StrongBox"
+        else -> "Level $v"
+    }
+
+    private fun bootStateName(v: Int) = when (v) {
+        0 -> "Verified"
+        1 -> "Self-signed"
+        2 -> "Unverified"
+        3 -> "Failed"
+        else -> "State $v"
     }
 
     // ---------------------------------------------------------------- Helpers

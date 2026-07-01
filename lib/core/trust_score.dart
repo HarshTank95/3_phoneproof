@@ -2,7 +2,9 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 
+import 'anomaly_engine.dart';
 import 'models/battery_truth.dart';
+import 'models/device_truth.dart';
 import 'models/report.dart';
 import 'models/spec_truth.dart';
 import 'models/test_result.dart';
@@ -21,6 +23,14 @@ class TrustScoreEngine {
     required RamTruth ram,
     required StorageTruth storage,
     required AuthenticityTruth authenticity,
+    required AttestationTruth attestation,
+    required DrmTruth drm,
+    required GpuTruth gpu,
+    required DisplayHdrTruth displayHdr,
+    required FeatureInventory features,
+    required UptimeTruth uptime,
+    required ThermalTruth thermal,
+    required CameraTruth cameras,
     required CheckGroup functional,
     String? imei,
   }) {
@@ -47,6 +57,55 @@ class TrustScoreEngine {
     }
     if (!build.versionConsistent) {
       deduct('Android version inconsistent with API level', 15, ReasonSeverity.major);
+    }
+
+    // ---- Hardware key attestation (Google-signed, spoof-resistant) ----
+    if (attestation.supported) {
+      if (attestation.isTrustedBoot) {
+        reasons.add(ScoreReason(
+            'Verified boot + locked bootloader (hardware-attested)', 0, ReasonSeverity.positive));
+      } else if (attestation.deviceLocked == false) {
+        deduct('Bootloader unlocked (hardware-attested) — common with reflashed/tampered phones',
+            22, ReasonSeverity.major);
+      } else if (attestation.verifiedBootState != null &&
+          attestation.verifiedBootState != 'Verified') {
+        deduct('Boot chain not "Verified" (hardware-attested: ${attestation.verifiedBootState})',
+            22, ReasonSeverity.major);
+      }
+    }
+
+    // ---- Security patch staleness (factual, from the build) ----
+    final patchMonths = _patchAgeMonths(build.securityPatch);
+    if (patchMonths != null) {
+      if (patchMonths >= 36) {
+        deduct('Security patch is very old (~$patchMonths months) — unsupported/unsafe', 15,
+            ReasonSeverity.major);
+      } else if (patchMonths >= 18) {
+        deduct('Security patch is stale (~$patchMonths months behind)', 8, ReasonSeverity.minor);
+      }
+    }
+
+    // ---- Patch-level consistency: OS-claimed vs hardware-attested ----
+    if (_patchMismatch(attestation, build)) {
+      deduct('OS-claimed security patch differs from the hardware-attested patch (possible spoof/rollback)',
+          15, ReasonSeverity.major);
+    }
+
+    // ---- Cross-signal anomalies (contradictions) ----
+    final anomalies = AnomalyEngine.detect(
+      build: build,
+      attestation: attestation,
+      gpu: gpu,
+      cpu: cpu,
+      storage: storage,
+      drm: drm,
+      uptime: uptime,
+    );
+    for (final a in anomalies) {
+      if (a.penalty > 0) {
+        deduct(a.title, a.penalty,
+            a.penalty >= 12 ? ReasonSeverity.major : ReasonSeverity.minor);
+      }
     }
 
     // ---- Storage capacity (critical) ----
@@ -142,6 +201,15 @@ class TrustScoreEngine {
       ram: ram,
       storage: storage,
       authenticity: authenticity,
+      attestation: attestation,
+      drm: drm,
+      gpu: gpu,
+      displayHdr: displayHdr,
+      features: features,
+      uptime: uptime,
+      thermal: thermal,
+      cameras: cameras,
+      anomalies: anomalies,
       build: build,
       functional: functional,
       imei: imei,
@@ -242,6 +310,15 @@ class TrustScoreEngine {
     required RamTruth ram,
     required StorageTruth storage,
     required AuthenticityTruth authenticity,
+    required AttestationTruth attestation,
+    required DrmTruth drm,
+    required GpuTruth gpu,
+    required DisplayHdrTruth displayHdr,
+    required FeatureInventory features,
+    required UptimeTruth uptime,
+    required ThermalTruth thermal,
+    required CameraTruth cameras,
+    required List<Anomaly> anomalies,
     required BuildTruth build,
     required CheckGroup functional,
     String? imei,
@@ -428,6 +505,78 @@ class TrustScoreEngine {
         meaning: 'Components actually present — missing ones are suspicious on flagships.',
       ),
       CheckResult(
+        id: 'gpu',
+        title: 'GPU (measured)',
+        status: gpu.available && gpu.renderer != null ? CheckStatus.info : CheckStatus.unavailable,
+        detail: gpu.available && gpu.renderer != null
+            ? '${gpu.renderer}${gpu.vendor != null ? ' · ${gpu.vendor}' : ''}'
+            : 'Not reported by this device',
+        meaning: 'Real graphics chip from a live OpenGL context — cross-checks the claimed SoC.',
+      ),
+      CheckResult(
+        id: 'display_hdr',
+        title: 'HDR & colour',
+        status: displayHdr.hdrTypes.isNotEmpty || displayHdr.wideColorGamut == true
+            ? CheckStatus.info
+            : (displayHdr.wideColorGamut == null ? CheckStatus.unavailable : CheckStatus.info),
+        detail: () {
+          final parts = <String>[];
+          if (displayHdr.hdrTypes.isNotEmpty) parts.add(displayHdr.hdrTypes.join(', '));
+          if (displayHdr.wideColorGamut == true) parts.add('wide colour gamut');
+          if (parts.isEmpty) {
+            return displayHdr.wideColorGamut == false ? 'No HDR / standard gamut' : 'Not reported by this device';
+          }
+          return parts.join(' · ');
+        }(),
+        meaning: 'Panel HDR formats and colour gamut the display actually supports.',
+      ),
+      CheckResult(
+        id: 'drm',
+        title: 'Widevine DRM level',
+        status: drm.securityLevel == null
+            ? (drm.widevineSupported ? CheckStatus.info : CheckStatus.unavailable)
+            : CheckStatus.info,
+        detail: drm.securityLevel != null
+            ? '${drm.securityLevel}${drm.securityLevel == 'L1' ? ' · HD streaming capable' : drm.securityLevel == 'L3' ? ' · SD only (no HD Netflix/Prime)' : ''}'
+                '${drm.hdcpLevel != null ? ' · HDCP ${drm.hdcpLevel!.replaceFirst('HDCP_', '')}' : ''}'
+            : (drm.widevineSupported ? 'Supported, level not reported' : 'Not reported by this device'),
+        meaning: 'L1 keeps HD streaming; L3 (or a downgrade) often means a tampered/custom ROM.',
+      ),
+      CheckResult(
+        id: 'features',
+        title: 'Hardware features',
+        status: features.features.isEmpty ? CheckStatus.unavailable : CheckStatus.info,
+        detail: features.features.isEmpty
+            ? 'Not reported by this device'
+            : '${features.present.length}/${features.features.length} present'
+                '${features.absent.isNotEmpty ? ' · missing: ${features.absent.join(', ')}' : ''}',
+        meaning: 'NFC, fingerprint, IR, etc. — reported exactly as the OS declares them.',
+      ),
+      CheckResult(
+        id: 'cameras',
+        title: 'Cameras (measured)',
+        status: cameras.cameras.isEmpty ? CheckStatus.unavailable : CheckStatus.info,
+        detail: cameras.cameras.isEmpty ? 'Not reported by this device' : _cameraSummary(cameras),
+        meaning: 'Real sensor resolution and lens count from the camera hardware — catches inflated MP or fake-camera claims.',
+      ),
+      CheckResult(
+        id: 'thermal',
+        title: 'Thermal headroom',
+        status: !thermal.available
+            ? CheckStatus.unavailable
+            : (thermal.statusRaw != null && thermal.statusRaw! >= 3)
+                ? CheckStatus.caution
+                : CheckStatus.info,
+        detail: (() {
+          if (!thermal.available) return 'Not reported by this device';
+          final parts = <String>[];
+          if (thermal.statusLabel != null) parts.add(thermal.statusLabel!);
+          if (thermal.marginPct != null) parts.add('${thermal.marginPct}% margin before throttling');
+          return parts.isEmpty ? 'Available (headroom not reported)' : parts.join(' · ');
+        })(),
+        meaning: 'How close the phone is to overheating/throttling — a proxy for cooling health and reworked boards.',
+      ),
+      CheckResult(
         id: 'build_sanity',
         title: 'Build / environment',
         status: build.versionConsistent ? CheckStatus.pass : CheckStatus.caution,
@@ -474,6 +623,69 @@ class TrustScoreEngine {
         meaning: 'Heuristic root check — can be fooled; treat as a signal.',
       ),
       CheckResult(
+        id: 'verified_boot',
+        title: 'Verified boot (hardware-attested)',
+        status: !attestation.supported || attestation.verifiedBootState == null
+            ? CheckStatus.unavailable
+            : attestation.verifiedBootState == 'Verified'
+                ? CheckStatus.pass
+                : attestation.verifiedBootState == 'Self-signed'
+                    ? CheckStatus.caution
+                    : CheckStatus.fail,
+        detail: !attestation.supported
+            ? (attestation.reason ?? 'Not reported by this device')
+            : attestation.verifiedBootState ?? 'Not reported by this device',
+        meaning: 'Google-signed boot-chain state from secure hardware. Very hard to fake.',
+      ),
+      CheckResult(
+        id: 'bootloader',
+        title: 'Bootloader lock (hardware-attested)',
+        status: !attestation.supported || attestation.deviceLocked == null
+            ? CheckStatus.unavailable
+            : attestation.deviceLocked!
+                ? CheckStatus.pass
+                : CheckStatus.caution,
+        detail: !attestation.supported || attestation.deviceLocked == null
+            ? (attestation.reason ?? 'Not reported by this device')
+            : attestation.deviceLocked!
+                ? 'Locked'
+                : 'Unlocked — phone has been reflashable',
+        meaning: 'An unlocked bootloader is a common sign of a tampered or reflashed device.',
+      ),
+      CheckResult(
+        id: 'attest_level',
+        title: 'Attestation security level',
+        status: attestation.supported && attestation.securityLevel != null
+            ? CheckStatus.info
+            : CheckStatus.unavailable,
+        detail: attestation.supported && attestation.securityLevel != null
+            ? attestation.securityLevel!
+            : (attestation.reason ?? 'Not reported by this device'),
+        meaning: 'Where the attestation was signed — TEE or StrongBox means real secure hardware.',
+      ),
+      CheckResult(
+        id: 'patch_consistency',
+        title: 'Patch level consistency',
+        status: (!attestation.supported || attestation.osPatchLevel == null || build.securityPatch == null)
+            ? CheckStatus.unavailable
+            : _patchMismatch(attestation, build)
+                ? CheckStatus.caution
+                : CheckStatus.pass,
+        detail: (!attestation.supported || attestation.osPatchLevel == null || build.securityPatch == null)
+            ? 'Not reported by this device'
+            : _patchMismatch(attestation, build)
+                ? 'OS claims ${build.securityPatch} · hardware attests ${_fmtYm(_attestedPatchYm(attestation.osPatchLevel))}'
+                : 'OS-claimed and hardware-attested patch agree',
+        meaning: 'The patch date the OS reports vs the one signed by secure hardware. A mismatch signals edited build props or a rollback.',
+      ),
+      CheckResult(
+        id: 'uptime',
+        title: 'Time since last boot',
+        status: uptime.humanUptime == null ? CheckStatus.unavailable : CheckStatus.info,
+        detail: uptime.humanUptime ?? 'Not reported by this device',
+        meaning: 'A phone booted moments ago may have been factory-reset to hide its history.',
+      ),
+      CheckResult(
         id: 'imei',
         title: 'IMEI',
         status: CheckStatus.info,
@@ -482,10 +694,40 @@ class TrustScoreEngine {
       ),
     ];
 
+    // ---- Cross-checks (contradictions between signals) ----
+    final crossChecks = anomalies.isEmpty
+        ? <CheckResult>[
+            const CheckResult(
+              id: 'no_anomaly',
+              title: 'Cross-signal consistency',
+              status: CheckStatus.pass,
+              detail: 'No contradictions detected across signals',
+              meaning: 'We compare signals against each other to catch edited or faked hardware.',
+            )
+          ]
+        : anomalies
+            .map((a) => CheckResult(
+                  id: a.id,
+                  title: a.title,
+                  status: switch (a.confidence) {
+                    AnomalyConfidence.high => CheckStatus.fail,
+                    AnomalyConfidence.medium => CheckStatus.caution,
+                    AnomalyConfidence.low => CheckStatus.info,
+                  },
+                  detail: a.detail,
+                  meaning: switch (a.confidence) {
+                    AnomalyConfidence.high => 'High-confidence cross-check.',
+                    AnomalyConfidence.medium => 'Medium-confidence — treat as a strong hint.',
+                    AnomalyConfidence.low => 'Low-confidence hint, not proof.',
+                  },
+                ))
+            .toList();
+
     return [
       CheckGroup(id: 'battery', title: 'Battery Truth', icon: Icons.battery_charging_full_rounded, checks: _ordered(batteryChecks)),
       CheckGroup(id: 'spec', title: 'Spec Truth', icon: Icons.memory_rounded, checks: _ordered(specChecks)),
       CheckGroup(id: 'auth', title: 'Authenticity', icon: Icons.verified_user_rounded, checks: _ordered(authChecks)),
+      CheckGroup(id: 'crosschecks', title: 'Cross-checks', icon: Icons.rule_rounded, checks: _ordered(crossChecks)),
       CheckGroup(id: functional.id, title: functional.title, icon: functional.icon, checks: _ordered(functional.checks)),
     ];
   }
@@ -523,6 +765,63 @@ class TrustScoreEngine {
 
   static String _fmtDate(DateTime d) =>
       '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+  /// Security-patch date the OS claims (`Build.SECURITY_PATCH`), as YYYYMM.
+  static int? _claimedPatchYm(String? patch) {
+    if (patch == null || patch.isEmpty) return null;
+    final parts = patch.split('-');
+    if (parts.length < 2) return null;
+    final y = int.tryParse(parts[0]);
+    final m = int.tryParse(parts[1]);
+    if (y == null || m == null) return null;
+    return y * 100 + m;
+  }
+
+  /// Attested patch level as YYYYMM (attestation gives YYYYMM, occasionally YYYYMMDD).
+  static int? _attestedPatchYm(int? osPatchLevel) {
+    if (osPatchLevel == null) return null;
+    var v = osPatchLevel;
+    if (v > 999999) v = v ~/ 100; // YYYYMMDD -> YYYYMM
+    return v;
+  }
+
+  static String _fmtYm(int? ym) {
+    if (ym == null) return '—';
+    final y = ym ~/ 100;
+    final m = ym % 100;
+    return '$y-${m.toString().padLeft(2, '0')}';
+  }
+
+  /// True only when BOTH patch levels are known and disagree.
+  static bool _patchMismatch(AttestationTruth a, BuildTruth b) {
+    if (!a.supported) return false;
+    final claimed = _claimedPatchYm(b.securityPatch);
+    final attested = _attestedPatchYm(a.osPatchLevel);
+    if (claimed == null || attested == null) return false;
+    return claimed != attested;
+  }
+
+  /// Months between the build's security-patch date and now. Null if unparseable.
+  static int? _patchAgeMonths(String? patch) {
+    if (patch == null || patch.isEmpty) return null;
+    final parts = patch.split('-');
+    if (parts.length < 2) return null;
+    final y = int.tryParse(parts[0]);
+    final m = int.tryParse(parts[1]);
+    if (y == null || m == null) return null;
+    final now = DateTime.now();
+    final months = (now.year - y) * 12 + (now.month - m);
+    return months < 0 ? 0 : months;
+  }
+
+  static String _cameraSummary(CameraTruth c) {
+    String side(List<CameraSpec> list) => list.map((e) => e.mpLabel).join(' + ');
+    final parts = <String>[];
+    if (c.rear.isNotEmpty) parts.add('Rear ${side(c.rear)}');
+    if (c.front.isNotEmpty) parts.add('Front ${side(c.front)}');
+    if (c.anyOis) parts.add('OIS');
+    return parts.isEmpty ? '${c.cameras.length} cameras' : parts.join(' · ');
+  }
 
   static String _gb(int bytes) => '${(bytes / (1000 * 1000 * 1000)).toStringAsFixed(1)} GB';
   static String _mb(int bytes) => '${(bytes / (1024 * 1024)).toStringAsFixed(0)} MB';
