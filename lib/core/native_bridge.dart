@@ -50,4 +50,16 @@ class NativeBridge {
   static Future<Map<dynamic, dynamic>> systemFeatures() => _map('systemFeatures');
   static Future<Map<dynamic, dynamic>> uptime() => _map('uptime');
   static Future<List<dynamic>> cameraSpecs() => _list('cameraSpecs');
+  static Future<Map<dynamic, dynamic>> codecInfo() => _map('codecInfo');
+  static Future<Map<dynamic, dynamic>> kernelSelinux() => _map('kernelSelinux');
+  static Future<Map<dynamic, dynamic>> hapticsInfo() => _map('hapticsInfo');
+  static Future<Map<dynamic, dynamic>> biometricInfo() => _map('biometricInfo');
+  static Future<Map<dynamic, dynamic>> connectivityInfo() => _map('connectivityInfo');
+
+  /// Keep the screen awake (battery capacity test). Best-effort.
+  static Future<void> keepScreenOn(bool on) async {
+    try {
+      await _ch.invokeMethod('keepScreenOn', on);
+    } catch (_) {}
+  }
 }

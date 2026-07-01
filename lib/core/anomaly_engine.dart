@@ -37,9 +37,35 @@ class AnomalyEngine {
     required StorageTruth storage,
     required DrmTruth drm,
     required UptimeTruth uptime,
+    required CodecTruth codecs,
+    required SystemIntegrityTruth systemIntegrity,
   }) {
     final out = <Anomaly>[];
     final isFlagship = cpu.multiScore >= 9000 || cpu.maxFreqGhz >= 2.8;
+
+    // --- SELinux permissive (only scored here) ---
+    if (systemIntegrity.selinuxEnforcing == false) {
+      out.add(const Anomaly(
+        id: 'ax_selinux',
+        title: 'SELinux is permissive',
+        detail:
+            'Stock Android always runs SELinux "Enforcing". Permissive means the security policy is disabled — a custom or tampered OS.',
+        confidence: AnomalyConfidence.high,
+        penalty: 15,
+      ));
+    }
+
+    // --- Modern chip without a hardware HEVC decoder ---
+    if (isFlagship && codecs.available && !codecs.hasHwHevc) {
+      out.add(const Anomaly(
+        id: 'ax_codec',
+        title: 'Flagship chip but no hardware HEVC decoder',
+        detail:
+            'Every real flagship SoC since ~2016 decodes HEVC in silicon. Its absence suggests an emulator or a misrepresented chip.',
+        confidence: AnomalyConfidence.medium,
+        penalty: 8,
+      ));
+    }
 
     // --- Bootloader / verified boot (hardware-attested, already scored) ---
     if (attestation.supported && attestation.deviceLocked == false) {

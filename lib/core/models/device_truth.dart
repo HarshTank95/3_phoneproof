@@ -91,13 +91,146 @@ class GpuTruth {
 class DisplayHdrTruth {
   final List<String> hdrTypes;
   final bool? wideColorGamut;
+  final double? maxLuminanceNits; // panel-reported HDR peak
 
-  const DisplayHdrTruth({this.hdrTypes = const [], this.wideColorGamut});
+  const DisplayHdrTruth({this.hdrTypes = const [], this.wideColorGamut, this.maxLuminanceNits});
 
   factory DisplayHdrTruth.fromMap(Map<dynamic, dynamic> m) {
     return DisplayHdrTruth(
       hdrTypes: ((m['hdrTypes'] as List?) ?? const []).map((e) => e.toString()).toList(),
       wideColorGamut: m['wideColorGamut'] is bool ? m['wideColorGamut'] as bool : null,
+      maxLuminanceNits: (m['maxLuminance'] as num?)?.toDouble(),
+    );
+  }
+}
+
+/// Hardware media decoders — a spoof-resistant SoC fingerprint.
+class CodecTruth {
+  final bool available;
+  final List<String> hardwareDecoders; // e.g. AV1, HEVC, VP9, Dolby Vision
+  final List<String> softwareOnlyDecoders;
+  final int totalDecoders;
+
+  const CodecTruth({
+    this.available = false,
+    this.hardwareDecoders = const [],
+    this.softwareOnlyDecoders = const [],
+    this.totalDecoders = 0,
+  });
+
+  bool get hasHwHevc => hardwareDecoders.contains('HEVC');
+  bool get hasHwAv1 => hardwareDecoders.contains('AV1');
+
+  factory CodecTruth.fromMap(Map<dynamic, dynamic> m) {
+    List<String> strs(dynamic v) => ((v as List?) ?? const []).map((e) => e.toString()).toList();
+    return CodecTruth(
+      available: m['available'] == true,
+      hardwareDecoders: strs(m['hardwareDecoders']),
+      softwareOnlyDecoders: strs(m['softwareOnlyDecoders']),
+      totalDecoders: (m['totalDecoders'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
+/// Kernel identity + SELinux enforcement (permissive = strong tamper signal).
+class SystemIntegrityTruth {
+  final String? kernelVersion;
+  final bool? selinuxEnforcing; // null = not readable on this device
+
+  const SystemIntegrityTruth({this.kernelVersion, this.selinuxEnforcing});
+
+  factory SystemIntegrityTruth.fromMap(Map<dynamic, dynamic> m) {
+    return SystemIntegrityTruth(
+      kernelVersion: m['kernelVersion'] as String?,
+      selinuxEnforcing: m['selinuxEnforcing'] is bool ? m['selinuxEnforcing'] as bool : null,
+    );
+  }
+}
+
+/// Vibration hardware class — amplitude control + primitives = real LRA motor.
+class HapticsTruth {
+  final bool? hasVibrator;
+  final bool? amplitudeControl;
+  final bool? richPrimitives; // Android 12+ composition primitives
+
+  const HapticsTruth({this.hasVibrator, this.amplitudeControl, this.richPrimitives});
+
+  factory HapticsTruth.fromMap(Map<dynamic, dynamic> m) {
+    bool? b(dynamic v) => v is bool ? v : null;
+    return HapticsTruth(
+      hasVibrator: b(m['hasVibrator']),
+      amplitudeControl: b(m['amplitudeControl']),
+      richPrimitives: b(m['richPrimitives']),
+    );
+  }
+}
+
+/// Biometric hardware class (Class 3 "strong" = hardware-backed).
+class BiometricTruth {
+  final String? strong; // Available / Hardware present / No hardware / null
+  final String? weak;
+  final bool fingerprintFeature;
+
+  const BiometricTruth({this.strong, this.weak, this.fingerprintFeature = false});
+
+  factory BiometricTruth.fromMap(Map<dynamic, dynamic> m) {
+    return BiometricTruth(
+      strong: m['strong'] as String?,
+      weak: m['weak'] as String?,
+      fingerprintFeature: m['fingerprintFeature'] == true,
+    );
+  }
+}
+
+/// Radio capability generation (capability queries only — no scanning).
+class ConnectivityTruth {
+  final bool? wifi5Ghz;
+  final bool? wifi6Ghz; // 6 GHz band (Wi-Fi 6E)
+  final bool? wifi6; // 802.11ax
+  final bool? wifi7; // 802.11be
+  final bool? btLe2MPhy; // Bluetooth 5 2M PHY
+  final bool? btLeCodedPhy; // BT5 long range
+  final bool? btLeExtAdv;
+
+  const ConnectivityTruth({
+    this.wifi5Ghz,
+    this.wifi6Ghz,
+    this.wifi6,
+    this.wifi7,
+    this.btLe2MPhy,
+    this.btLeCodedPhy,
+    this.btLeExtAdv,
+  });
+
+  String? get wifiLabel {
+    if (wifi7 == true) return 'Wi-Fi 7 (802.11be)';
+    if (wifi6 == true) return wifi6Ghz == true ? 'Wi-Fi 6E' : 'Wi-Fi 6 (802.11ax)';
+    if (wifi5Ghz == true) return 'Dual-band (2.4 + 5 GHz)';
+    if (wifi5Ghz == false) return '2.4 GHz only';
+    return null;
+  }
+
+  String? get btLabel {
+    final feats = <String>[
+      if (btLe2MPhy == true) '2M PHY',
+      if (btLeCodedPhy == true) 'long range',
+      if (btLeExtAdv == true) 'ext. advertising',
+    ];
+    if (feats.isNotEmpty) return 'Bluetooth 5 class (${feats.join(', ')})';
+    if (btLe2MPhy == false) return 'Bluetooth 4.x class';
+    return null;
+  }
+
+  factory ConnectivityTruth.fromMap(Map<dynamic, dynamic> m) {
+    bool? b(dynamic v) => v is bool ? v : null;
+    return ConnectivityTruth(
+      wifi5Ghz: b(m['wifi5Ghz']),
+      wifi6Ghz: b(m['wifi6Ghz']),
+      wifi6: b(m['wifi6']),
+      wifi7: b(m['wifi7']),
+      btLe2MPhy: b(m['btLe2MPhy']),
+      btLeCodedPhy: b(m['btLeCodedPhy']),
+      btLeExtAdv: b(m['btLeExtAdv']),
     );
   }
 }

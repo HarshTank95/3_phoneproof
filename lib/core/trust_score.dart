@@ -31,6 +31,11 @@ class TrustScoreEngine {
     required UptimeTruth uptime,
     required ThermalTruth thermal,
     required CameraTruth cameras,
+    required CodecTruth codecs,
+    required SystemIntegrityTruth systemIntegrity,
+    required HapticsTruth haptics,
+    required BiometricTruth biometrics,
+    required ConnectivityTruth connectivity,
     required CheckGroup functional,
     String? imei,
   }) {
@@ -100,6 +105,8 @@ class TrustScoreEngine {
       storage: storage,
       drm: drm,
       uptime: uptime,
+      codecs: codecs,
+      systemIntegrity: systemIntegrity,
     );
     for (final a in anomalies) {
       if (a.penalty > 0) {
@@ -209,6 +216,11 @@ class TrustScoreEngine {
       uptime: uptime,
       thermal: thermal,
       cameras: cameras,
+      codecs: codecs,
+      systemIntegrity: systemIntegrity,
+      haptics: haptics,
+      biometrics: biometrics,
+      connectivity: connectivity,
       anomalies: anomalies,
       build: build,
       functional: functional,
@@ -318,6 +330,11 @@ class TrustScoreEngine {
     required UptimeTruth uptime,
     required ThermalTruth thermal,
     required CameraTruth cameras,
+    required CodecTruth codecs,
+    required SystemIntegrityTruth systemIntegrity,
+    required HapticsTruth haptics,
+    required BiometricTruth biometrics,
+    required ConnectivityTruth connectivity,
     required List<Anomaly> anomalies,
     required BuildTruth build,
     required CheckGroup functional,
@@ -415,6 +432,15 @@ class TrustScoreEngine {
         meaning: 'Live charging status and connection type.',
       ),
       avail('tech', 'Technology', battery.technology, '', meaning: 'Cell chemistry.'),
+      if (battery.statusRaw == 2 && battery.currentNowUa != null && battery.voltageMilliV != null)
+        CheckResult(
+          id: 'chargepower',
+          title: 'Charging power (live)',
+          status: CheckStatus.info,
+          detail:
+              '${((battery.currentNowUa!.abs() / 1e6) * (battery.voltageMilliV! / 1000.0)).toStringAsFixed(1)} W',
+          meaning: 'Measured watts flowing right now — sanity-checks fast-charging claims.',
+        ),
       CheckResult(
         id: 'chargenow',
         title: 'Charge stored now',
@@ -523,6 +549,9 @@ class TrustScoreEngine {
           final parts = <String>[];
           if (displayHdr.hdrTypes.isNotEmpty) parts.add(displayHdr.hdrTypes.join(', '));
           if (displayHdr.wideColorGamut == true) parts.add('wide colour gamut');
+          if (displayHdr.maxLuminanceNits != null && displayHdr.maxLuminanceNits! > 0) {
+            parts.add('peak ~${displayHdr.maxLuminanceNits!.round()} nits (HDR)');
+          }
           if (parts.isEmpty) {
             return displayHdr.wideColorGamut == false ? 'No HDR / standard gamut' : 'Not reported by this device';
           }
@@ -551,6 +580,47 @@ class TrustScoreEngine {
             : '${features.present.length}/${features.features.length} present'
                 '${features.absent.isNotEmpty ? ' · missing: ${features.absent.join(', ')}' : ''}',
         meaning: 'NFC, fingerprint, IR, etc. — reported exactly as the OS declares them.',
+      ),
+      CheckResult(
+        id: 'codecs',
+        title: 'Media decoders (hardware)',
+        status: !codecs.available ? CheckStatus.unavailable : CheckStatus.info,
+        detail: !codecs.available
+            ? 'Not reported by this device'
+            : codecs.hardwareDecoders.isEmpty
+                ? 'No hardware video decoders — very unusual for real hardware'
+                : codecs.hardwareDecoders.join(', '),
+        meaning: 'Video formats the chip decodes in silicon — a fingerprint of the real SoC.',
+      ),
+      CheckResult(
+        id: 'haptics',
+        title: 'Haptics class',
+        status: haptics.hasVibrator == null
+            ? CheckStatus.unavailable
+            : haptics.hasVibrator == false
+                ? CheckStatus.caution
+                : CheckStatus.info,
+        detail: () {
+          if (haptics.hasVibrator == null) return 'Not reported by this device';
+          if (haptics.hasVibrator == false) return 'No vibration motor detected';
+          final feats = <String>[
+            if (haptics.amplitudeControl == true) 'amplitude control',
+            if (haptics.richPrimitives == true) 'rich haptic primitives',
+          ];
+          return feats.isEmpty ? 'Basic vibration only (simple buzzer)' : feats.join(' · ');
+        }(),
+        meaning: 'A real linear haptic motor supports fine control — cheap fakes ship a basic buzzer.',
+      ),
+      CheckResult(
+        id: 'connectivity',
+        title: 'Wi-Fi / Bluetooth class',
+        status: (connectivity.wifiLabel == null && connectivity.btLabel == null)
+            ? CheckStatus.unavailable
+            : CheckStatus.info,
+        detail: [connectivity.wifiLabel, connectivity.btLabel].whereType<String>().isEmpty
+            ? 'Not reported by this device'
+            : [connectivity.wifiLabel, connectivity.btLabel].whereType<String>().join(' · '),
+        meaning: 'Radio capability the hardware actually declares — checks "Wi-Fi 6 / BT 5.x" claims.',
       ),
       CheckResult(
         id: 'cameras',
@@ -677,6 +747,37 @@ class TrustScoreEngine {
                 ? 'OS claims ${build.securityPatch} · hardware attests ${_fmtYm(_attestedPatchYm(attestation.osPatchLevel))}'
                 : 'OS-claimed and hardware-attested patch agree',
         meaning: 'The patch date the OS reports vs the one signed by secure hardware. A mismatch signals edited build props or a rollback.',
+      ),
+      CheckResult(
+        id: 'selinux',
+        title: 'SELinux enforcement',
+        status: systemIntegrity.selinuxEnforcing == null
+            ? CheckStatus.unavailable
+            : systemIntegrity.selinuxEnforcing!
+                ? CheckStatus.pass
+                : CheckStatus.fail,
+        detail: systemIntegrity.selinuxEnforcing == null
+            ? 'Not readable on this device'
+            : systemIntegrity.selinuxEnforcing!
+                ? 'Enforcing'
+                : 'Permissive — security policy disabled (tampered/custom OS)',
+        meaning: 'Every stock Android ships SELinux "Enforcing". Permissive is a strong tamper sign.',
+      ),
+      CheckResult(
+        id: 'biometric_class',
+        title: 'Biometric hardware class',
+        status: biometrics.strong == null ? CheckStatus.unavailable : CheckStatus.info,
+        detail: biometrics.strong == null
+            ? (biometrics.fingerprintFeature ? 'Fingerprint hardware declared' : 'Not reported by this device')
+            : 'Class 3 (strong): ${biometrics.strong}',
+        meaning: 'Class 3 = hardware-backed biometrics (unlocks payments). Fakes usually lack it.',
+      ),
+      CheckResult(
+        id: 'kernel',
+        title: 'Kernel',
+        status: systemIntegrity.kernelVersion == null ? CheckStatus.unavailable : CheckStatus.info,
+        detail: systemIntegrity.kernelVersion ?? 'Not reported by this device',
+        meaning: 'The Linux kernel build — roughly tracks the device generation and OEM support.',
       ),
       CheckResult(
         id: 'uptime',

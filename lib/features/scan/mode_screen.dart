@@ -5,6 +5,7 @@ import '../../ui/glass_card.dart';
 import '../../ui/motion.dart';
 import '../../ui/theme.dart';
 import '../../ui/transitions.dart';
+import '../battery_truth/capacity_test_screen.dart';
 import 'scan_screen.dart';
 
 /// Landing screen. One scan covers both buying and selling — pitch it once,
@@ -23,11 +24,18 @@ class ModeScreen extends StatelessWidget {
     return Scaffold(
       body: AppBackground(
         child: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(22, 16, 22, 22),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
+          // Adaptive: identical fixed layout on normal screens; on short screens
+          // or large accessibility font scales it scrolls instead of overflowing.
+          child: LayoutBuilder(
+            builder: (context, constraints) => SingleChildScrollView(
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                child: IntrinsicHeight(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(22, 16, 22, 22),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
                 Row(
                   children: [
                     Container(
@@ -59,34 +67,33 @@ class ModeScreen extends StatelessWidget {
                   'and lying sellers can’t spoof.',
                   style: TextStyle(color: AppColors.textDim, fontSize: 15, height: 1.4),
                 ),
-                const SizedBox(height: 28),
-                Expanded(
-                  child: Center(
-                    child: GlassCard(
-                      padding: const EdgeInsets.all(22),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: const [
-                          Text('What the scan reveals',
-                              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
-                          SizedBox(height: 16),
-                          _Point(Icons.battery_full_rounded, 'Battery truth',
-                              'Real health, wear and live condition.'),
-                          SizedBox(height: 14),
-                          _Point(Icons.memory_rounded, 'Anti-spoof specs',
-                              'Storage, RAM, display, sensors and CPU — measured, not trusted.'),
-                          SizedBox(height: 14),
-                          _Point(Icons.verified_user_rounded, 'Authenticity',
-                              'Emulator / root heuristics and a genuine-device check.'),
-                          SizedBox(height: 14),
-                          _Point(Icons.workspace_premium_rounded, 'Trust Certificate',
-                              'A Trust Score and a shareable, tamper-evident report.'),
-                        ],
-                      ),
-                    ),
+                const SizedBox(height: 24),
+                GlassCard(
+                  padding: const EdgeInsets.all(18),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: const [
+                      Text('What the scan reveals',
+                          style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15)),
+                      SizedBox(height: 14),
+                      Row(children: [
+                        _Point(Icons.battery_full_rounded, 'Battery truth'),
+                        SizedBox(width: 10),
+                        _Point(Icons.memory_rounded, 'Anti-spoof specs'),
+                      ]),
+                      SizedBox(height: 10),
+                      Row(children: [
+                        _Point(Icons.verified_user_rounded, 'Authenticity'),
+                        SizedBox(width: 10),
+                        _Point(Icons.workspace_premium_rounded, 'Trust Certificate'),
+                      ]),
+                    ],
                   ),
                 ),
+                // Single stretch zone: pushes the actions to the bottom on tall
+                // screens, collapses to nothing on short ones.
+                const Spacer(),
                 const SizedBox(height: 20),
                 FilledButton.icon(
                   onPressed: () => _startScan(context),
@@ -94,6 +101,16 @@ class ModeScreen extends StatelessWidget {
                   label: const Text('Scan this phone'),
                   style: FilledButton.styleFrom(
                     minimumSize: const Size.fromHeight(54),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                OutlinedButton.icon(
+                  onPressed: () => Navigator.of(context)
+                      .push(sharedAxisRoute(context, const CapacityTestScreen())),
+                  icon: const Icon(Icons.battery_charging_full_rounded),
+                  label: const Text('Battery capacity test'),
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size.fromHeight(48),
                   ),
                 ),
                 const SizedBox(height: 14),
@@ -109,7 +126,11 @@ class ModeScreen extends StatelessWidget {
                     ),
                   ],
                 ),
-              ],
+                      ],
+                    ),
+                  ),
+                ),
+              ),
             ),
           ),
         ),
@@ -121,37 +142,30 @@ class ModeScreen extends StatelessWidget {
 class _Point extends StatelessWidget {
   final IconData icon;
   final String title;
-  final String subtitle;
-  const _Point(this.icon, this.title, this.subtitle);
+  const _Point(this.icon, this.title);
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Container(
-          width: 38,
-          height: 38,
-          decoration: BoxDecoration(
-            color: AppColors.accent.withValues(alpha: 0.14),
-            borderRadius: BorderRadius.circular(11),
-          ),
-          child: Icon(icon, color: AppColors.accent, size: 20),
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.04),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: AppColors.hairline),
         ),
-        const SizedBox(width: 14),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(title, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
-              const SizedBox(height: 2),
-              Text(subtitle,
-                  style: const TextStyle(
-                      color: AppColors.textDim, fontSize: 12.5, height: 1.3)),
-            ],
-          ),
+        child: Row(
+          children: [
+            Icon(icon, color: AppColors.accent, size: 18),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(title,
+                  maxLines: 2,
+                  style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12.5, height: 1.15)),
+            ),
+          ],
         ),
-      ],
+      ),
     );
   }
 }

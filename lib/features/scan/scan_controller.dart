@@ -57,6 +57,11 @@ class ScanController extends ChangeNotifier {
   UptimeTruth? uptime;
   ThermalTruth? thermal;
   CameraTruth? cameras;
+  CodecTruth? codecs;
+  SystemIntegrityTruth? systemIntegrity;
+  HapticsTruth? haptics;
+  BiometricTruth? biometrics;
+  ConnectivityTruth? connectivity;
 
   // Interactive functional results (filled by the guided steps).
   final List<CheckResult> functionalResults = [];
@@ -115,6 +120,9 @@ class ScanController extends ChangeNotifier {
     features = FeatureInventory.fromMap(await NativeBridge.systemFeatures());
     thermal = ThermalTruth.fromMap(await NativeBridge.thermalStatus());
     cameras = CameraTruth.fromList(await NativeBridge.cameraSpecs());
+    codecs = CodecTruth.fromMap(await NativeBridge.codecInfo());
+    haptics = HapticsTruth.fromMap(await NativeBridge.hapticsInfo());
+    connectivity = ConnectivityTruth.fromMap(await NativeBridge.connectivityInfo());
     _finish('specs',
         '${cpu!.cores} cores · ${ram!.totalGb.toStringAsFixed(0)}GB · ${storage!.verified == true ? 'storage OK' : 'storage ?'}');
     await _pace();
@@ -125,9 +133,12 @@ class ScanController extends ChangeNotifier {
     final verdict = await PlayIntegrity.check();
     auth = auth.withIntegrity(verdict);
     authenticity = auth;
-    // Tier A: hardware key attestation (verified boot + bootloader lock) + uptime.
+    // Tier A: hardware key attestation (verified boot + bootloader lock) + uptime,
+    // kernel/SELinux integrity, biometric hardware class.
     attestation = AttestationTruth.fromMap(await NativeBridge.keyAttestation());
     uptime = UptimeTruth.fromMap(await NativeBridge.uptime());
+    systemIntegrity = SystemIntegrityTruth.fromMap(await NativeBridge.kernelSelinux());
+    biometrics = BiometricTruth.fromMap(await NativeBridge.biometricInfo());
     _finish('authenticity',
         auth.isEmulator
             ? 'Emulator!'
@@ -191,6 +202,11 @@ class ScanController extends ChangeNotifier {
       uptime: uptime ?? const UptimeTruth(),
       thermal: thermal ?? const ThermalTruth(),
       cameras: cameras ?? const CameraTruth([]),
+      codecs: codecs ?? const CodecTruth(),
+      systemIntegrity: systemIntegrity ?? const SystemIntegrityTruth(),
+      haptics: haptics ?? const HapticsTruth(),
+      biometrics: biometrics ?? const BiometricTruth(),
+      connectivity: connectivity ?? const ConnectivityTruth(),
       functional: functionalGroup,
       imei: imei,
     );

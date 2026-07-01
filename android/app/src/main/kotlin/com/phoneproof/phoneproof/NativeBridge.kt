@@ -5,12 +5,19 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.bluetooth.BluetoothManager
 import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorManager
+import android.hardware.biometrics.BiometricManager
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
+import android.media.MediaCodecList
 import android.media.MediaDrm
+import android.net.wifi.WifiManager
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.opengl.EGL14
 import android.opengl.EGLConfig
 import android.opengl.GLES20
@@ -70,10 +77,15 @@ class NativeBridge(private val context: Context) {
                 "displayHdr" -> result.success(displayHdr())
                 "systemFeatures" -> result.success(systemFeatures())
                 "uptime" -> result.success(uptime())
+                "kernelSelinux" -> result.success(kernelSelinux())
+                "hapticsInfo" -> result.success(hapticsInfo())
+                "biometricInfo" -> result.success(biometricInfo())
+                "connectivityInfo" -> result.success(connectivityInfo())
                 // Slow / blocking -> background thread to avoid ANR.
                 "keyAttestation" -> runAsync(result) { keyAttestation() }
                 "gpuInfo" -> runAsync(result) { gpuInfo() }
                 "cameraSpecs" -> runAsync(result) { cameraSpecs() }
+                "codecInfo" -> runAsync(result) { codecInfo() }
                 "emulatorRoot" -> runAsync(result) { emulatorRoot() }
                 "storageWriteVerify" -> runAsync(result) {
                     val sizeMb = (args as? Map<*, *>)?.get("sampleMb") as? Int ?: 64
@@ -971,6 +983,158 @@ class NativeBridge(private val context: Context) {
         2 -> "Unverified"
         3 -> "Failed"
         else -> "State $v"
+    }
+
+    // ---------------------------------------------------------------- Codecs
+
+    /** Hardware media decoders — a spoof-resistant SoC fingerprint. */
+    private fun codecInfo(): Map<String, Any?> {
+        val interesting = mapOf(
+            "video/av01" to "AV1",
+            "video/hevc" to "HEVC",
+            "video/x-vnd.on2.vp9" to "VP9",
+            "video/dolby-vision" to "Dolby Vision"
+        )
+        val hw = LinkedHashSet<String>()
+        val swOnly = LinkedHashSet<String>()
+        var total = 0
+        return try {
+            val list = MediaCodecList(MediaCodecList.ALL_CODECS)
+            for (info in list.codecInfos) {
+                if (info.isEncoder) continue
+                total++
+                val accel = if (Build.VERSION.SDK_INT >= 29) {
+                    info.isHardwareAccelerated
+                } else {
+                    val n = info.name.lowercase()
+                    !(n.startsWith("omx.google") || n.startsWith("c2.android"))
+                }
+                for (t in info.supportedTypes) {
+                    val label = interesting[t.lowercase()] ?: continue
+                    if (accel) hw.add(label) else if (!hw.contains(label)) swOnly.add(label)
+                }
+            }
+            swOnly.removeAll(hw)
+            mapOf(
+                "available" to true,
+                "hardwareDecoders" to hw.toList(),
+                "softwareOnlyDecoders" to swOnly.toList(),
+                "totalDecoders" to total
+            )
+        } catch (e: Throwable) {
+            mapOf("available" to false, "error" to e.message)
+        }
+    }
+
+    // ---------------------------------------------------------------- Kernel / SELinux
+
+    private fun kernelSelinux(): Map<String, Any?> {
+        val out = HashMap<String, Any?>()
+        out["kernelVersion"] = try {
+            val raw = File("/proc/version").readText().trim()
+            // "Linux version 5.4.210-qgki-... (build...)" -> keep the useful head.
+            Regex("Linux version (\\S+)").find(raw)?.groupValues?.get(1) ?: raw.take(80)
+        } catch (_: Throwable) {
+            System.getProperty("os.version")
+        }
+        out["selinuxEnforcing"] = when (readSysfsLong("/sys/fs/selinux/enforce")) {
+            1L -> true
+            0L -> false
+            else -> null // not readable on this device — reported as unknown
+        }
+        return out
+    }
+
+    // ---------------------------------------------------------------- Haptics
+
+    /** Vibration hardware class — amplitude control + rich primitives = real LRA motor. */
+    private fun hapticsInfo(): Map<String, Any?> {
+        return try {
+            val vib: Vibrator = if (Build.VERSION.SDK_INT >= 31) {
+                (context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+            }
+            val out = HashMap<String, Any?>()
+            out["hasVibrator"] = vib.hasVibrator()
+            out["amplitudeControl"] = if (Build.VERSION.SDK_INT >= 26) vib.hasAmplitudeControl() else null
+            if (Build.VERSION.SDK_INT >= 31) {
+                val prims = intArrayOf(
+                    VibrationEffect.Composition.PRIMITIVE_CLICK,
+                    VibrationEffect.Composition.PRIMITIVE_TICK
+                )
+                out["richPrimitives"] = try {
+                    vib.areAllPrimitivesSupported(*prims)
+                } catch (_: Throwable) {
+                    null
+                }
+            } else {
+                out["richPrimitives"] = null
+            }
+            out
+        } catch (e: Throwable) {
+            mapOf("hasVibrator" to null, "error" to e.message)
+        }
+    }
+
+    // ---------------------------------------------------------------- Biometrics
+
+    /** Class of biometric hardware actually present (Class 3 = hardware-backed). */
+    private fun biometricInfo(): Map<String, Any?> {
+        if (Build.VERSION.SDK_INT < 30) {
+            // Pre-30 has no authenticator-class query; report the feature flags only.
+            return mapOf(
+                "strong" to null,
+                "weak" to null,
+                "fingerprintFeature" to context.packageManager.hasSystemFeature(PackageManager.FEATURE_FINGERPRINT)
+            )
+        }
+        fun label(code: Int): String = when (code) {
+            BiometricManager.BIOMETRIC_SUCCESS -> "Available"
+            BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED -> "Hardware present (nothing enrolled)"
+            BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE -> "No hardware"
+            BiometricManager.BIOMETRIC_ERROR_HW_UNAVAILABLE -> "Hardware unavailable"
+            else -> "Status $code"
+        }
+        return try {
+            val bm = context.getSystemService(BiometricManager::class.java)
+            mapOf(
+                "strong" to label(bm.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG)),
+                "weak" to label(bm.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_WEAK)),
+                "fingerprintFeature" to context.packageManager.hasSystemFeature(PackageManager.FEATURE_FINGERPRINT)
+            )
+        } catch (e: Throwable) {
+            mapOf("strong" to null, "weak" to null, "error" to e.message)
+        }
+    }
+
+    // ---------------------------------------------------------------- Connectivity class
+
+    /** Radio capability generation. Capability queries only — no scanning, no
+     *  location. Anything a permission blocks degrades to null ("Not reported"). */
+    private fun connectivityInfo(): Map<String, Any?> {
+        val out = HashMap<String, Any?>()
+        try {
+            val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            out["wifi5Ghz"] = try { wm.is5GHzBandSupported } catch (_: Throwable) { null }
+            if (Build.VERSION.SDK_INT >= 30) {
+                out["wifi6Ghz"] = try { wm.is6GHzBandSupported } catch (_: Throwable) { null }
+                // ScanResult.WIFI_STANDARD_11AX = 6 (Wi-Fi 6), _11BE = 8 (Wi-Fi 7)
+                out["wifi6"] = try { wm.isWifiStandardSupported(6) } catch (_: Throwable) { null }
+                out["wifi7"] = try { wm.isWifiStandardSupported(8) } catch (_: Throwable) { null }
+            }
+        } catch (_: Throwable) { }
+        try {
+            val bm = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+            val adapter = bm.adapter
+            if (adapter != null) {
+                out["btLe2MPhy"] = try { adapter.isLe2MPhySupported } catch (_: Throwable) { null }
+                out["btLeCodedPhy"] = try { adapter.isLeCodedPhySupported } catch (_: Throwable) { null }
+                out["btLeExtAdv"] = try { adapter.isLeExtendedAdvertisingSupported } catch (_: Throwable) { null }
+            }
+        } catch (_: Throwable) { }
+        return out
     }
 
     // ---------------------------------------------------------------- Helpers
