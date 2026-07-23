@@ -22,13 +22,12 @@ class ConnectivitySnapshot {
 class ConnectivityTest {
   static Future<ConnectivitySnapshot> read() async {
     final results = await Connectivity().checkConnectivity();
-    String? wifiName;
     String? ip;
+    // Only the device's own IP — no SSID/BSSID, so no location permission is
+    // needed (SSID read would require ACCESS_FINE_LOCATION, which we don't want).
     if (results.contains(ConnectivityResult.wifi)) {
       try {
-        final info = NetworkInfo();
-        wifiName = await info.getWifiName();
-        ip = await info.getWifiIP();
+        ip = await NetworkInfo().getWifiIP();
       } catch (_) {}
     }
     return ConnectivitySnapshot(
@@ -36,7 +35,7 @@ class ConnectivityTest {
       mobile: results.contains(ConnectivityResult.mobile),
       bluetooth: results.contains(ConnectivityResult.bluetooth),
       vpn: results.contains(ConnectivityResult.vpn),
-      wifiName: wifiName,
+      wifiName: null,
       ip: ip,
     );
   }
